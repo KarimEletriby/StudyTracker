@@ -1,0 +1,54 @@
+# A string used to distinguish different Supabase projects on the same host. Defaults to the working directory name when running `supabase init`.
+project_id = "study-planner"
+
+[api]
+enabled = true
+# Port to use for the API URL.
+port = 54321
+# Schemas to expose in your API. Tables, views and stored procedures in this schema will get API endpoints.
+# public and storage are always included.
+schemas = ["public", "storage"]
+# Number of maximum rows returned from a view, table, or stored procedure. Limits payload size for accidental large queries.
+max_rows = 1000
+
+[db]
+# Port to use for the local database URL.
+port = 54322
+# Port to use for the database pooler.
+pooler_port = 54329
+# Major version of Postgres to use.
+major_version = 15
+
+[db.pooler]
+enabled = false
+port = 54329
+pool_mode = "transaction"
+default_pool_size = 20
+max_client_conn = 100
+
+[auth]
+enabled = true
+# The base URL of your website. Used as an allow-list for redirects and for constructing only-once URLs for email verification, password reset, etc.
+site_url = "http://localhost:3000"
+# A list of *exact* URLs that auth will redirect to after login, or after an email confirmation link is clicked.
+additional_redirect_urls = ["http://localhost:3000/**"]
+# How long tokens are valid for, in seconds. Defaults to 3600 (1 hour).
+jwt_expiry = 3600
+# If disabled, signups require user's email to be confirmed before they can sign in.
+enable_signup = true
+
+[auth.email]
+# If enabled, users need to confirm their email address before signing in.
+enable_confirmations = true
+# Controls how long a user has to confirm their email address.
+max_frequency = "1m"
+
+[auth.external.anonymous_users]
+enabled = false
+
+[storage]
+enabled = false
+
+[analytics]
+enabled = false
+
