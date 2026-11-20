@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode, useCallback } from 'react';
 import { Subject, Task, DashboardStats, UserProfile } from '../types';
+import { supabase, checkSupabaseConnection, ConnectionHealth, isSupabaseConfigured } from '../lib/supabase';
 
 interface Toast {
   id: string;
@@ -13,6 +14,8 @@ interface StudyContextType {
   user: UserProfile;
   stats: DashboardStats;
   toasts: Toast[];
+  connectionHealth: ConnectionHealth;
+  isSyncing: boolean;
   showToast: (message: string, type?: Toast['type']) => void;
   dismissToast: (id: string) => void;
   // Subject actions
@@ -25,15 +28,15 @@ interface StudyContextType {
   updateTask: (id: string, data: Partial<Task>) => void;
   deleteTask: (id: string) => void;
   toggleTaskComplete: (id: string) => void;
-  // Helpers
+  // Helpers & Diagnostic
   getSubjectTaskCount: (subjectId: string) => { total: number; pending: number; completed: number };
   resetDefaultData: () => void;
+  refreshBackendStatus: () => Promise<void>;
 }
 
 const STORAGE_KEY_SUBJECTS = 'study_planner_subjects_v1';
 const STORAGE_KEY_TASKS = 'study_planner_tasks_v1';
 
-// Preset subject accent colors
 export const SUBJECT_COLOR_OPTIONS = [
   { name: 'Indigo', hex: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE', text: '#3730A3' },
   { name: 'Coral', hex: '#FF6358', bg: '#FFF5F4', border: '#FFD6D3', text: '#C7362C' },
@@ -44,6 +47,12 @@ export const SUBJECT_COLOR_OPTIONS = [
   { name: 'Rose', hex: '#E11D48', bg: '#FFF1F2', border: '#FECDD3', text: '#9F1239' },
   { name: 'Teal', hex: '#0D9488', bg: '#F0FDFA', border: '#99F6E4', text: '#115E59' },
 ];
+
+function offsetDateString(daysOffset: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + daysOffset);
+  return d.toISOString().split('T')[0];
+}
 
 const INITIAL_SUBJECTS: Subject[] = [
   {
@@ -103,19 +112,12 @@ const INITIAL_SUBJECTS: Subject[] = [
   },
 ];
 
-// Helper to get formatted date string: YYYY-MM-DD
-function offsetDateString(daysOffset: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + daysOffset);
-  return d.toISOString().split('T')[0];
-}
-
 const INITIAL_TASKS: Task[] = [
   {
     id: 'task-1',
     title: 'Implement Red-Black Tree Balancing in C++',
     subjectId: 'sub-1',
-    dueDate: offsetDateString(1), // Tomorrow
+    dueDate: offsetDateString(1),
     priority: 'high',
     status: 'in_progress',
     estimatedMinutes: 120,
@@ -137,7 +139,7 @@ const INITIAL_TASKS: Task[] = [
     id: 'task-3',
     title: 'Multivariable Optimization Problem Set #6',
     subjectId: 'sub-3',
-    dueDate: offsetDateString(-1), // Past due / completed
+    dueDate: offsetDateString(-1),
     priority: 'medium',
     status: 'completed',
     estimatedMinutes: 60,
@@ -214,7 +216,6 @@ const INITIAL_USER: UserProfile = {
 const StudyContext = createContext<StudyContextType | undefined>(undefined);
 
 export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // Load initial from localStorage or defaults
   const [subjects, setSubjects] = useState<Subject[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_SUBJECTS);
@@ -237,8 +238,26 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
 
   const [user] = useState<UserProfile>(INITIAL_USER);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>({
+    isConfigured: isSupabaseConfigured,
+    isConnected: false,
+    status: isSupabaseConfigured ? 'offline' : 'unconfigured',
+    message: isSupabaseConfigured ? 'Checking connection...' : 'Local storage demo mode active',
+    url: import.meta.env.VITE_SUPABASE_URL || 'Not specified',
+  });
 
-  // Synchronize to localStorage
+  // Check connection status on load
+  const refreshBackendStatus = useCallback(async () => {
+    const health = await checkSupabaseConnection();
+    setConnectionHealth(health);
+  }, []);
+
+  useEffect(() => {
+    refreshBackendStatus();
+  }, [refreshBackendStatus]);
+
+  // Persist locally
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY_SUBJECTS, JSON.stringify(subjects));
@@ -255,7 +274,6 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     }
   }, [tasks]);
 
-  // Toast management
   const showToast = (message: string, type: Toast['type'] = 'success') => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
     setToasts((prev) => [...prev, { id, type, message }]);
@@ -268,7 +286,7 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  // Subject actions
+  // Subject actions (Optimistic UI + Background Supabase Sync)
   const addSubject = (data: Omit<Subject, 'id' | 'createdAt'>): Subject => {
     const newSubject: Subject = {
       ...data,
@@ -277,6 +295,23 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     };
     setSubjects((prev) => [newSubject, ...prev]);
     showToast(`Added subject "${newSubject.name}"`);
+
+    // Sync to Supabase if connected
+    if (supabase && connectionHealth.isConnected) {
+      setIsSyncing(true);
+      supabase
+        .from('subjects')
+        .insert({
+          id: newSubject.id,
+          name: newSubject.name,
+          color: newSubject.color,
+        })
+        .then(({ error }) => {
+          setIsSyncing(false);
+          if (error) console.warn('Supabase sync warning:', error.message);
+        });
+    }
+
     return newSubject;
   };
 
@@ -285,19 +320,45 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       prev.map((sub) => (sub.id === id ? { ...sub, ...data } : sub))
     );
     showToast('Subject updated successfully');
+
+    if (supabase && connectionHealth.isConnected) {
+      setIsSyncing(true);
+      supabase
+        .from('subjects')
+        .update({
+          name: data.name,
+          color: data.color,
+        })
+        .eq('id', id)
+        .then(({ error }) => {
+          setIsSyncing(false);
+          if (error) console.warn('Supabase sync warning:', error.message);
+        });
+    }
   };
 
   const deleteSubject = (id: string) => {
     const target = subjects.find((s) => s.id === id);
     setSubjects((prev) => prev.filter((s) => s.id !== id));
-    // Cascade delete or keep tasks
     setTasks((prev) => prev.filter((t) => t.subjectId !== id));
     showToast(`Removed "${target?.name || 'Subject'}" and linked tasks`, 'info');
+
+    if (supabase && connectionHealth.isConnected) {
+      setIsSyncing(true);
+      supabase
+        .from('subjects')
+        .delete()
+        .eq('id', id)
+        .then(({ error }) => {
+          setIsSyncing(false);
+          if (error) console.warn('Supabase sync warning:', error.message);
+        });
+    }
   };
 
   const getSubjectById = (id: string) => subjects.find((s) => s.id === id);
 
-  // Task actions
+  // Task actions (Optimistic UI + Background Supabase Sync)
   const addTask = (data: Omit<Task, 'id' | 'createdAt'>): Task => {
     const newTask: Task = {
       ...data,
@@ -307,6 +368,26 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     };
     setTasks((prev) => [newTask, ...prev]);
     showToast(`Task "${newTask.title.slice(0, 32)}..." created`);
+
+    if (supabase && connectionHealth.isConnected) {
+      setIsSyncing(true);
+      supabase
+        .from('tasks')
+        .insert({
+          id: newTask.id,
+          subject_id: newTask.subjectId,
+          title: newTask.title,
+          description: newTask.notes,
+          due_date: newTask.dueDate,
+          priority: newTask.priority,
+          is_completed: newTask.status === 'completed',
+        })
+        .then(({ error }) => {
+          setIsSyncing(false);
+          if (error) console.warn('Supabase sync warning:', error.message);
+        });
+    }
+
     return newTask;
   };
 
@@ -324,19 +405,50 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       })
     );
     showToast('Task updated successfully');
+
+    if (supabase && connectionHealth.isConnected) {
+      setIsSyncing(true);
+      supabase
+        .from('tasks')
+        .update({
+          title: data.title,
+          description: data.notes,
+          due_date: data.dueDate,
+          priority: data.priority,
+          is_completed: data.status === 'completed',
+        })
+        .eq('id', id)
+        .then(({ error }) => {
+          setIsSyncing(false);
+          if (error) console.warn('Supabase sync warning:', error.message);
+        });
+    }
   };
 
   const deleteTask = (id: string) => {
     const target = tasks.find((t) => t.id === id);
     setTasks((prev) => prev.filter((t) => t.id !== id));
     showToast(`Deleted task "${target?.title.slice(0, 28) || 'Task'}"`, 'info');
+
+    if (supabase && connectionHealth.isConnected) {
+      setIsSyncing(true);
+      supabase
+        .from('tasks')
+        .delete()
+        .eq('id', id)
+        .then(({ error }) => {
+          setIsSyncing(false);
+          if (error) console.warn('Supabase sync warning:', error.message);
+        });
+    }
   };
 
   const toggleTaskComplete = (id: string) => {
+    let willBeComplete = false;
     setTasks((prev) =>
       prev.map((t) => {
         if (t.id !== id) return t;
-        const willBeComplete = t.status !== 'completed';
+        willBeComplete = t.status !== 'completed';
         return {
           ...t,
           status: willBeComplete ? 'completed' : 'todo',
@@ -344,11 +456,23 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         };
       })
     );
-    const target = tasks.find((t) => t.id === id);
-    if (target?.status !== 'completed') {
+
+    if (willBeComplete) {
       showToast('Task marked as completed! 🎉');
     } else {
       showToast('Task marked as pending', 'info');
+    }
+
+    if (supabase && connectionHealth.isConnected) {
+      setIsSyncing(true);
+      supabase
+        .from('tasks')
+        .update({ is_completed: willBeComplete })
+        .eq('id', id)
+        .then(({ error }) => {
+          setIsSyncing(false);
+          if (error) console.warn('Supabase sync warning:', error.message);
+        });
     }
   };
 
@@ -361,7 +485,6 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     };
   };
 
-  // Reset to initial demo data
   const resetDefaultData = () => {
     setSubjects(INITIAL_SUBJECTS);
     setTasks(INITIAL_TASKS);
@@ -370,7 +493,6 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     showToast('Reset to original demo data', 'info');
   };
 
-  // Derive stats reactively
   const stats: DashboardStats = useMemo(() => {
     const totalSubjects = subjects.length;
     const completedTasks = tasks.filter((t) => t.status === 'completed').length;
@@ -407,6 +529,8 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         user,
         stats,
         toasts,
+        connectionHealth,
+        isSyncing,
         showToast,
         dismissToast,
         addSubject,
@@ -419,6 +543,7 @@ export const StudyProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         toggleTaskComplete,
         getSubjectTaskCount,
         resetDefaultData,
+        refreshBackendStatus,
       }}
     >
       {children}
@@ -433,4 +558,3 @@ export const useStudy = () => {
   }
   return context;
 };
-

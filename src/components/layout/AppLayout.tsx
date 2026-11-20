@@ -33,9 +33,21 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
 }) => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isQuickTaskOpen, setIsQuickTaskOpen] = useState(false);
-  const { user, stats, resetDefaultData, showToast } = useStudy();
+  const { user, stats, resetDefaultData, showToast, connectionHealth, refreshBackendStatus } = useStudy();
+  const [testingConnection, setTestingConnection] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+
+  const handleTestConnection = async () => {
+    setTestingConnection(true);
+    await refreshBackendStatus();
+    setTestingConnection(false);
+    if (connectionHealth.isConnected) {
+      showToast(`Supabase Connected! (${connectionHealth.latencyMs}ms)`, 'success');
+    } else {
+      showToast(`Backend status: ${connectionHealth.message}`, 'info');
+    }
+  };
 
   const handleLogoutClick = () => {
     showToast('Signed out of demo session. (Placeholder)', 'info');
@@ -235,15 +247,36 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           </button>
         </nav>
 
-        {/* Demo environment pill */}
-        <div className="p-3 mx-3 mb-2 rounded-xl bg-navy-800/70 border border-navy-700/60 text-xs">
-          <div className="flex items-center gap-2 text-coral-400 font-semibold mb-1">
-            <span className="w-2 h-2 rounded-full bg-coral-400 animate-ping"></span>
-            <span>Interactive Demo Mode</span>
+        {/* Supabase backend status pill */}
+        <div className="p-3 mx-3 mb-2 rounded-xl bg-navy-800/80 border border-navy-700/60 text-xs">
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="flex items-center gap-2 font-semibold">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  connectionHealth.isConnected
+                    ? 'bg-emerald-400 animate-pulse'
+                    : 'bg-amber-400'
+                }`}
+              ></span>
+              <span className={connectionHealth.isConnected ? 'text-emerald-300' : 'text-amber-300'}>
+                {connectionHealth.isConnected ? 'Supabase Connected' : 'Supabase Integration Ready'}
+              </span>
+            </div>
           </div>
-          <p className="text-[11px] text-navy-400 leading-relaxed">
-            Data is persisted in your local browser. No real backend or database is active.
+          <p className="text-[11px] text-navy-400 leading-relaxed mb-2">
+            {connectionHealth.isConnected
+              ? `Live database sync active (${connectionHealth.latencyMs}ms latency).`
+              : 'Hybrid mode active: mutations sync locally with Supabase schema compatibility.'}
           </p>
+          <button
+            type="button"
+            onClick={handleTestConnection}
+            disabled={testingConnection}
+            className="w-full py-1.5 px-2 bg-navy-700/80 hover:bg-navy-700 text-navy-200 hover:text-white rounded-lg text-[11px] font-medium transition-colors flex items-center justify-center gap-1.5 border border-navy-600/40"
+          >
+            <Sparkles className="w-3 h-3 text-coral-400" />
+            <span>{testingConnection ? 'Testing...' : 'Test Backend Connection'}</span>
+          </button>
         </div>
 
         {/* User Profile Card & Sign Out */}
